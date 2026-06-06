@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 
@@ -89,10 +90,32 @@ class Storage:
         await self._conn.commit()
 
     async def set_notification_time(self, telegram_user_id: int, value: str | None) -> None:
-        await self._conn.execute(
-            "UPDATE users SET notification_time = ?, updated_at = ? WHERE telegram_user_id = ?",
-            (value, self._now(), telegram_user_id),
-        )
+        """Set (or clear with None) the daily notification time.
+
+        Setting a time also reschedules today, so the user gets exactly one send
+        at the chosen time:
+        - time still ahead today -> clear last_sent_date so the summary fires
+          today at that time (even if one was already sent earlier today);
+        - time already passed today -> mark today as sent so we don't fire an
+          immediate catch-up; the first send then lands tomorrow.
+
+        Genuine catch-up after downtime is unaffected: there last_sent_date stays
+        in the past, so a missed slot is still delivered when the bot returns.
+        """
+        user = await self.get_user(telegram_user_id) if value is not None else None
+        if value is not None and user is not None:
+            now = dt.datetime.now(ZoneInfo(user.timezone))
+            last_sent = now.strftime("%Y-%m-%d") if now.strftime("%H:%M") >= value else None
+            await self._conn.execute(
+                "UPDATE users SET notification_time = ?, last_sent_date = ?, updated_at = ? "
+                "WHERE telegram_user_id = ?",
+                (value, last_sent, self._now(), telegram_user_id),
+            )
+        else:
+            await self._conn.execute(
+                "UPDATE users SET notification_time = ?, updated_at = ? WHERE telegram_user_id = ?",
+                (value, self._now(), telegram_user_id),
+            )
         await self._conn.commit()
 
     async def set_timezone(self, telegram_user_id: int, timezone: str) -> None:
