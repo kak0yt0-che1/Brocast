@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     default_timezone: str = "Asia/Almaty"
 
     phrase_mode_enabled: bool = True
+    widgets_enabled: bool = True
 
     @field_validator("default_timezone")
     @classmethod

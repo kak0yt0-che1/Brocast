@@ -1,4 +1,4 @@
-"""Style phrase pools. The app picks a phrase; the model only wraps advice around it."""
+"""Style phrase pools. The app picks a random phrase for the day's category."""
 from __future__ import annotations
 
 import json
@@ -8,7 +8,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-CATEGORIES = ("heat", "rain", "cool_windy", "freezing", "chaotic", "mild")
+CATEGORIES = (
+    "heat", "rain", "cool_windy", "freezing", "chaotic", "mild",
+    "storm_thunder", "blizzard", "umbrella",
+)
+
+THUNDER_CODES = {95, 96, 99}
+SNOW_CODES = {71, 73, 75, 77, 85, 86}
 
 _DEFAULT_PATH = Path(__file__).with_name("phrases.json")
 
@@ -42,8 +48,8 @@ class PhrasePool:
 def categorize_weather(context: dict) -> str:
     """Pick the style category that fits today.
 
-    Checked worst-first: freezing, rain, heat, cool/windy, a big day-long swing,
-    and finally "mild" for a calm, dry, roughly +17..+24 day worth no warning.
+    Checked worst-first: thunderstorm, blizzard, freezing, rain, heat, cool/windy,
+    a big day-long swing, and finally "mild" for a calm, dry, roughly +17..+24 day.
     """
     today = context.get("today", {})
     temp_max = today.get("temp_max_c")
@@ -63,6 +69,12 @@ def categorize_weather(context: dict) -> str:
         and temp_max - temp_min >= 12
     )
 
+    code = today.get("weather_code")
+    gust = today.get("wind_gust_max_kmh")
+    if code in THUNDER_CODES:
+        return "storm_thunder"
+    if code in SNOW_CODES and (at_least(gust, 35) or at_most(temp_max, -5)):
+        return "blizzard"
     if at_most(temp_max, 3):
         return "freezing"
     if rainy:

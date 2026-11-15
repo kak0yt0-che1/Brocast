@@ -51,10 +51,33 @@ def build_recommendation(context: dict) -> dict:
     }
 
 
-def build_styled(context: dict, phrase: str | None) -> str:
+def build_styled(context: dict, phrase: str | None, evening: bool = False) -> str:
     """Persona mode: the fixed phrase plus a short factual line built from the data."""
-    fact = _fact_ru(context)
+    fact = _evening_fact_ru(context) if evening else _fact_ru(context)
     return f"{phrase} {fact}" if phrase else fact
+
+
+def _evening_fact_ru(context: dict) -> str:
+    hours = context.get("rain_hours_left") or []
+    if not hours:
+        return "Сейчас без дождя."
+    return f"Дождь ожидается около {hours[0]:02d}:00."
+
+
+def build_reminder_text(context: dict, phrase: str | None) -> str:
+    """Short 'right now' line for custom reminders."""
+    cur = context.get("current", {})
+    temp, feels = _num(cur.get("temp_c")), _num(cur.get("feels_like_c"))
+    parts = []
+    if temp is not None:
+        parts.append(f"Сейчас {round(temp):+d}°")
+        if feels is not None and abs(feels - temp) >= 3:
+            parts[-1] += f" (ощущается {round(feels):+d}°)"
+    hours = context.get("rain_hours_left") or []
+    if hours:
+        parts.append(f"дождь около {hours[0]:02d}:00")
+    fact = ", ".join(parts) + "." if parts else ""
+    return " ".join(x for x in (phrase, fact) if x)
 
 
 def _is_rainy(today: dict) -> bool:
@@ -89,9 +112,9 @@ def _headline(tmax, tmin, uv, gust, rain) -> str:
 def _summary(tmax, tmin, feels_max, rain) -> str:
     if tmax is None or tmin is None:
         return "Прогноз на сегодня."
-    text = f"Сегодня {round(tmin)}…{round(tmax)}°"
+    text = f"Сегодня {round(tmin):+d}…{round(tmax):+d}°"
     if feels_max is not None and abs(feels_max - tmax) >= 3:
-        text += f" (ощущается как {round(feels_max)}°)"
+        text += f" (ощущается как {round(feels_max):+d}°)"
     text += "."
     if rain:
         text += " Ожидается дождь."

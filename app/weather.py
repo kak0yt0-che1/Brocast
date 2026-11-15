@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import httpx
 
@@ -35,12 +36,26 @@ class WeatherError(Exception):
 class WeatherClient:
     BASE_URL = "https://api.open-meteo.com/v1/forecast"
 
+    CACHE_TTL = 600.0
+
     def __init__(self, latitude: float, longitude: float, timeout: float = 10.0) -> None:
         self._latitude = latitude
         self._longitude = longitude
         self._timeout = timeout
+        self._cache: tuple[float, dict] | None = None
+        self._lock = asyncio.Lock()
 
     async def fetch(self) -> dict:
+        """Forecast for the configured point; shared across users for CACHE_TTL seconds."""
+        async with self._lock:
+            now = time.monotonic()
+            if self._cache and now - self._cache[0] < self.CACHE_TTL:
+                return self._cache[1]
+            data = await self._fetch_remote()
+            self._cache = (now, data)
+            return data
+
+    async def _fetch_remote(self) -> dict:
         params = {
             "latitude": self._latitude,
             "longitude": self._longitude,
@@ -61,6 +76,10 @@ class WeatherClient:
                     return data
                 except (httpx.HTTPError, ValueError) as exc:
                     last_exc = exc
+                    status = getattr(getattr(exc, "response", None), "status_code", None)
+                    if status is not None and 400 <= status < 500 and status != 429:
+                        logger.warning("Open-Meteo rejected the request (%s); not retrying", status)
+                        break
                     logger.warning("Open-Meteo fetch failed (%d/3): %s", attempt + 1, type(exc).__name__)
                     if attempt < 2:
                         await asyncio.sleep(2 ** attempt)
@@ -95,6 +114,14 @@ def _peak(values: list, fn) -> float | None:
     return round(fn(nums), 1) if nums else None
 
 
+def _hour_of(stamp: object, default: int) -> int:
+    """Hour from an ISO stamp like '2026-11-15T14:30'."""
+    try:
+        return int(str(stamp)[11:13])
+    except ValueError:
+        return default
+
+
 def build_weather_context(raw: dict, city_name: str) -> dict:
     """Compress the API payload into a small snapshot of today.
 
@@ -102,7 +129,7 @@ def build_weather_context(raw: dict, city_name: str) -> dict:
     model can see how the day moves without 24 raw rows per field.
     """
     daily, hourly, current = raw["daily"], raw["hourly"], raw["current"]
-    today = daily["time"][0]  
+    today = daily["time"][0]
 
     times: list[str] = hourly["time"]
     today_hours = [i for i, t in enumerate(times) if t.startswith(today)]
@@ -133,9 +160,21 @@ def build_weather_context(raw: dict, city_name: str) -> dict:
     def today_value(field: str):
         return (daily.get(field) or [None])[0]
 
+    now_hour = _hour_of(current.get("time"), default=0)
+    rain_hours = [
+        int(times[i][11:13])
+        for i in today_hours
+        if int(times[i][11:13]) >= now_hour
+        and i < len(hourly.get("precipitation_probability") or [])
+        and isinstance(hourly["precipitation_probability"][i], (int, float))
+        and hourly["precipitation_probability"][i] >= 50
+    ]
+
     return {
         "city": city_name,
         "date": today,
+        "now_hour": now_hour,
+        "rain_hours_left": rain_hours,
         "current": {
             "temp_c": _round(current.get("temperature_2m")),
             "feels_like_c": _round(current.get("apparent_temperature")),

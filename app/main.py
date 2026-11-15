@@ -55,6 +55,14 @@ async def run() -> None:
         coalesce=True,
         id="daily_notifications",
     )
+    scheduler.add_job(
+        notifications.run_due_reminders,
+        "interval",
+        minutes=1,
+        max_instances=1,
+        coalesce=True,
+        id="custom_reminders",
+    )
     scheduler.start()
 
     try:
