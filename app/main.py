@@ -6,6 +6,7 @@ import logging
 import sys
 
 from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pydantic import ValidationError
 
@@ -42,6 +43,21 @@ async def run() -> None:
         phrase_pool=PhrasePool.load(),
         settings=settings,
     )
+
+    try:
+        await bot.set_my_commands([
+            BotCommand(command="now", description="Погода прямо сейчас"),
+            BotCommand(command="remind", description="Напоминание: /remind 19:15 вт,чт"),
+            BotCommand(command="reminders", description="Мои напоминания"),
+            BotCommand(command="settime", description="Время утренней сводки"),
+            BotCommand(command="tone", description="Тон сообщений"),
+            BotCommand(command="timezone", description="Часовой пояс"),
+            BotCommand(command="status", description="Мои настройки"),
+            BotCommand(command="help", description="Помощь"),
+            BotCommand(command="stop", description="Выключить всё"),
+        ])
+    except Exception:
+        logger.warning("Could not set bot commands", exc_info=True)
 
     dispatcher = Dispatcher(store=storage, settings=settings, notifications=notifications)
     dispatcher.include_router(router)

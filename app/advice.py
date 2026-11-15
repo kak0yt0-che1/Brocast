@@ -1,6 +1,7 @@
 """Turns a weather context into a recommendation using local rules — no paid API."""
 from __future__ import annotations
 
+NL = chr(10)
 _PART_LABELS_RU = {"morning": "утром", "afternoon": "днём", "evening": "вечером"}
 
 
@@ -51,21 +52,16 @@ def build_recommendation(context: dict) -> dict:
     }
 
 
-def build_styled(context: dict, phrase: str | None, evening: bool = False) -> str:
-    """Persona mode: the fixed phrase plus a short factual line built from the data."""
-    fact = _evening_fact_ru(context) if evening else _fact_ru(context)
-    return f"{phrase} {fact}" if phrase else fact
-
-
-def _evening_fact_ru(context: dict) -> str:
-    hours = context.get("rain_hours_left") or []
-    if not hours:
-        return "Сейчас без дождя."
-    return f"Дождь ожидается около {hours[0]:02d}:00."
+def build_styled(context: dict, phrase: str | None) -> str:
+    """Morning message: phrase + factual line, then compact 'take with you' chips."""
+    fact = _fact_ru(context)
+    head = f"{phrase} {fact}" if phrase else fact
+    chips = _chips(context)
+    return f"{head}{NL}{NL}{chips}" if chips else head
 
 
 def build_reminder_text(context: dict, phrase: str | None) -> str:
-    """Short 'right now' line for custom reminders."""
+    """Short 'right now' message for custom reminders."""
     cur = context.get("current", {})
     temp, feels = _num(cur.get("temp_c")), _num(cur.get("feels_like_c"))
     parts = []
@@ -77,7 +73,29 @@ def build_reminder_text(context: dict, phrase: str | None) -> str:
     if hours:
         parts.append(f"дождь около {hours[0]:02d}:00")
     fact = ", ".join(parts) + "." if parts else ""
-    return " ".join(x for x in (phrase, fact) if x)
+    head = " ".join(x for x in (phrase, fact) if x)
+    chips = _chips(context, upcoming_only=True)
+    return f"{head}{NL}{NL}{chips}" if chips else head
+
+
+def _chips(context: dict, upcoming_only: bool = False) -> str:
+    """One line of practical items: umbrella, SPF, wind jacket, warm layers, water."""
+    today = context.get("today", {})
+    tmax, tmin = _num(today.get("temp_max_c")), _num(today.get("temp_min_c"))
+    gust, uv = _num(today.get("wind_gust_max_kmh")), _num(today.get("uv_index_max"))
+    rainy = bool(context.get("rain_hours_left")) if upcoming_only else _is_rainy(today)
+    chips = []
+    if rainy:
+        chips.append("☂️ зонт")
+    if uv is not None and uv >= 6:
+        chips.append("🧴 SPF")
+    if gust is not None and gust >= 35:
+        chips.append("🧥 ветровка")
+    if tmin is not None and tmin <= 2:
+        chips.append("🧣 тёплое")
+    if tmax is not None and tmax >= 27:
+        chips.append("💧 вода")
+    return " · ".join(chips)
 
 
 def _is_rainy(today: dict) -> bool:

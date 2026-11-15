@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
     last_sent_date     TEXT,                 -- 'YYYY-MM-DD' in the user's timezone
     evening_time       TEXT,                 -- 'HH:MM' local umbrella reminder, or NULL
     last_evening_date  TEXT,
+    tone               TEXT    NOT NULL DEFAULT 'mix',
     created_at         TEXT    NOT NULL,
     updated_at         TEXT    NOT NULL
 );
@@ -35,6 +36,7 @@ class User:
     last_sent_date: str | None
     evening_time: str | None = None
     last_evening_date: str | None = None
+    tone: str = "mix"
 
 
 def _row_to_user(row: aiosqlite.Row) -> User:
@@ -48,6 +50,7 @@ def _row_to_user(row: aiosqlite.Row) -> User:
         last_sent_date=row["last_sent_date"],
         evening_time=row["evening_time"],
         last_evening_date=row["last_evening_date"],
+        tone=row["tone"] if "tone" in row.keys() else "mix",
     )
 
 
@@ -73,6 +76,15 @@ class Storage:
         for name in ("evening_time", "last_evening_date"):
             if name not in columns:
                 await self._db.execute(f"ALTER TABLE users ADD COLUMN {name} TEXT")
+        if "tone" not in columns:
+            await self._db.execute("ALTER TABLE users ADD COLUMN tone TEXT NOT NULL DEFAULT 'mix'")
+        # The old "evening umbrella" slot is now just a rain-only reminder.
+        await self._db.execute(
+            "INSERT INTO reminders (telegram_user_id, time, days, only_rain, last_sent_date) "
+            "SELECT telegram_user_id, evening_time, '', 1, last_evening_date "
+            "FROM users WHERE evening_time IS NOT NULL"
+        )
+        await self._db.execute("UPDATE users SET evening_time = NULL")
         await self._db.commit()
 
     async def close(self) -> None:
@@ -113,28 +125,24 @@ class Storage:
 
         Setting a time reschedules today so the user gets exactly one send: still
         ahead today -> fire today at that time; already passed -> first send tomorrow.
-        Genuine catch-up after downtime is unaffected.
         """
-        return await self._set_slot(telegram_user_id, "notification_time", "last_sent_date", value)
-
-    async def set_evening_time(self, telegram_user_id: int, value: str | None) -> bool:
-        return await self._set_slot(telegram_user_id, "evening_time", "last_evening_date", value)
-
-    async def _set_slot(self, uid: int, time_col: str, date_col: str, value: str | None) -> bool:
-        user = await self.get_user(uid)
+        user = await self.get_user(telegram_user_id)
         if user is None:
             return False
-        if value is None:
-            cur = await self._conn.execute(
-                f"UPDATE users SET {time_col} = NULL, updated_at = ? WHERE telegram_user_id = ?",
-                (self._now(), uid),
-            )
-        else:
-            cur = await self._conn.execute(
-                f"UPDATE users SET {time_col} = ?, {date_col} = ?, updated_at = ? "
-                "WHERE telegram_user_id = ?",
-                (value, _initial_last_sent(user.timezone, value), self._now(), uid),
-            )
+        last_sent = _initial_last_sent(user.timezone, value) if value else user.last_sent_date
+        await self._conn.execute(
+            "UPDATE users SET notification_time = ?, last_sent_date = ?, updated_at = ? "
+            "WHERE telegram_user_id = ?",
+            (value, last_sent, self._now(), telegram_user_id),
+        )
+        await self._conn.commit()
+        return True
+
+    async def set_tone(self, telegram_user_id: int, tone: str) -> bool:
+        cur = await self._conn.execute(
+            "UPDATE users SET tone = ?, updated_at = ? WHERE telegram_user_id = ?",
+            (tone, self._now(), telegram_user_id),
+        )
         await self._conn.commit()
         return cur.rowcount > 0
 
@@ -144,29 +152,26 @@ class Storage:
         if user is None:
             return False
         morning = _initial_last_sent(timezone, user.notification_time) if user.notification_time else None
-        evening = _initial_last_sent(timezone, user.evening_time) if user.evening_time else None
         await self._conn.execute(
-            "UPDATE users SET timezone = ?, last_sent_date = ?, last_evening_date = ?, "
-            "updated_at = ? WHERE telegram_user_id = ?",
-            (timezone, morning, evening, self._now(), telegram_user_id),
+            "UPDATE users SET timezone = ?, last_sent_date = ?, updated_at = ? "
+            "WHERE telegram_user_id = ?",
+            (timezone, morning, self._now(), telegram_user_id),
         )
+        for rem in await self.list_reminders(telegram_user_id):
+            await self._conn.execute(
+                "UPDATE reminders SET last_sent_date = ? WHERE id = ?",
+                (_initial_last_sent(timezone, rem.time), rem.id),
+            )
         await self._conn.commit()
         return True
 
     async def disable_user(self, telegram_user_id: int) -> None:
         """Turn off all scheduled sends (e.g. the user blocked the bot)."""
         await self._conn.execute(
-            "UPDATE users SET notification_time = NULL, evening_time = NULL, updated_at = ? "
-            "WHERE telegram_user_id = ?",
+            "UPDATE users SET notification_time = NULL, updated_at = ? WHERE telegram_user_id = ?",
             (self._now(), telegram_user_id),
         )
-        await self._conn.commit()
-
-    async def mark_evening_sent(self, telegram_user_id: int, date_str: str) -> None:
-        await self._conn.execute(
-            "UPDATE users SET last_evening_date = ?, updated_at = ? WHERE telegram_user_id = ?",
-            (date_str, self._now(), telegram_user_id),
-        )
+        await self._conn.execute("DELETE FROM reminders WHERE telegram_user_id = ?", (telegram_user_id,))
         await self._conn.commit()
 
     async def mark_sent(self, telegram_user_id: int, date_str: str) -> None:
@@ -185,7 +190,7 @@ class Storage:
 
     async def get_users_with_notifications(self) -> list[User]:
         async with self._conn.execute(
-            "SELECT * FROM users WHERE notification_time IS NOT NULL OR evening_time IS NOT NULL"
+            "SELECT * FROM users WHERE notification_time IS NOT NULL"
         ) as cursor:
             rows = await cursor.fetchall()
         return [_row_to_user(row) for row in rows]
@@ -223,7 +228,7 @@ class Storage:
 
     async def all_reminders(self) -> list[Reminder]:
         async with self._conn.execute(
-            "SELECT r.*, u.timezone, u.chat_id FROM reminders r "
+            "SELECT r.*, u.timezone, u.chat_id, u.tone FROM reminders r "
             "JOIN users u ON u.telegram_user_id = r.telegram_user_id"
         ) as cur:
             return [_row_to_reminder(r) for r in await cur.fetchall()]
@@ -246,6 +251,7 @@ class Reminder:
     last_sent_date: str | None
     timezone: str = "UTC"
     chat_id: int = 0
+    tone: str = "mix"
 
     def runs_on(self, weekday: int) -> bool:
         return not self.days or str(weekday) in self.days.split(",")
@@ -270,4 +276,5 @@ def _row_to_reminder(row) -> Reminder:
         days=row["days"], only_rain=bool(row["only_rain"]), last_sent_date=row["last_sent_date"],
         timezone=row["timezone"] if "timezone" in keys else "UTC",
         chat_id=row["chat_id"] if "chat_id" in keys else 0,
+        tone=row["tone"] if "tone" in keys else "mix",
     )
